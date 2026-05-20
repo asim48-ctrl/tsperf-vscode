@@ -5,6 +5,10 @@
   "version": "0.1.0",
   "license": "MIT",
   "publisher": "asim48",
+  "repository": {
+    "type": "git",
+    "url": "https://github.com/asim48-ctrl/tsperf-vscode.git"
+  },
   "engines": {
     "vscode": "^1.95.0"
   },
@@ -12,7 +16,8 @@
   "activationEvents": [
     "onLanguage:typescript",
     "onLanguage:typescriptreact",
-    "onCommand:tsperf.inspectTypeAtCursor"
+    "onCommand:tsperf.inspectTypeAtCursor",
+    "onCommand:tsperf.runFixtureBenchmark"
   ],
   "main": "./dist/extension.js",
   "contributes": {
@@ -20,6 +25,10 @@
       {
         "command": "tsperf.inspectTypeAtCursor",
         "title": "TSPerf: Inspect Type at Cursor"
+      },
+      {
+        "command": "tsperf.runFixtureBenchmark",
+        "title": "TSPerf: Run Fixture Benchmark"
       }
     ],
     "configuration": {
@@ -29,6 +38,11 @@
           "type": "number",
           "default": 512,
           "description": "Maximum TypeScript document size TSPerf will inspect automatically."
+        },
+        "tsperf.enableInlineDecorations": {
+          "type": "boolean",
+          "default": true,
+          "description": "Show inline latency and complexity measurements on inspected lines."
         }
       }
     }

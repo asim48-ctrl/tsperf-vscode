@@ -6,14 +6,25 @@ import ts from "typescript";
 type InspectionResult = {
   fileName: string;
   position: number;
+  line: number;
   elapsedMs: number;
   typeText: string;
   complexityScore: number;
   complexitySignals: string[];
+  source: "fresh" | "cache";
 };
 
 export function activate(context: vscode.ExtensionContext) {
-  const disposable = vscode.commands.registerCommand(
+  const cache = new Map<string, InspectionResult>();
+  const decorationType = vscode.window.createTextEditorDecorationType({
+    after: {
+      margin: "0 0 0 1.25rem",
+      color: new vscode.ThemeColor("descriptionForeground"),
+      fontStyle: "italic",
+    },
+  });
+
+  const inspectDisposable = vscode.commands.registerCommand(
     "tsperf.inspectTypeAtCursor",
     async () => {
       const editor = vscode.window.activeTextEditor;
@@ -22,9 +33,13 @@ export function activate(context: vscode.ExtensionContext) {
         return;
       }
 
-      const result = inspectEditorType(editor);
+      const result = inspectEditorType(editor, cache);
       if (!result) {
         return;
+      }
+
+      if (isInlineDecorationEnabled()) {
+        showInlineMeasurements(editor, [result], decorationType);
       }
 
       const panel = vscode.window.createWebviewPanel(
@@ -37,12 +52,56 @@ export function activate(context: vscode.ExtensionContext) {
     },
   );
 
-  context.subscriptions.push(disposable);
+  const benchmarkDisposable = vscode.commands.registerCommand(
+    "tsperf.runFixtureBenchmark",
+    async () => {
+      const benchmarkUri = vscode.Uri.joinPath(
+        context.extensionUri,
+        "fixtures",
+        "pathological-types.ts",
+      );
+      const document = await vscode.workspace.openTextDocument(benchmarkUri);
+      const editor = await vscode.window.showTextDocument(document);
+      const results = runFixtureBenchmark(editor, cache);
+
+      if (isInlineDecorationEnabled()) {
+        showInlineMeasurements(editor, results, decorationType);
+      }
+
+      const panel = vscode.window.createWebviewPanel(
+        "tsperfBenchmark",
+        "TSPerf Benchmark",
+        vscode.ViewColumn.Beside,
+        { enableScripts: false },
+      );
+      panel.webview.html = renderBenchmark(results);
+    },
+  );
+
+  const clearCacheDisposable = vscode.workspace.onDidChangeTextDocument(
+    (event) => {
+      for (const key of cache.keys()) {
+        if (key.startsWith(`${event.document.uri.toString()}:`)) {
+          cache.delete(key);
+        }
+      }
+    },
+  );
+
+  context.subscriptions.push(
+    inspectDisposable,
+    benchmarkDisposable,
+    clearCacheDisposable,
+    decorationType,
+  );
 }
 
 export function deactivate() {}
 
-function inspectEditorType(editor: vscode.TextEditor): InspectionResult | null {
+function inspectEditorType(
+  editor: vscode.TextEditor,
+  cache?: Map<string, InspectionResult>,
+): InspectionResult | null {
   const document = editor.document;
   if (
     document.languageId !== "typescript" &&
@@ -65,8 +124,13 @@ function inspectEditorType(editor: vscode.TextEditor): InspectionResult | null {
 
   const fileName = document.fileName;
   const position = document.offsetAt(editor.selection.active);
-  const service = createLanguageService(fileName, sourceText);
+  const cacheKey = getCacheKey(document, position);
+  const cached = cache?.get(cacheKey);
+  if (cached) {
+    return { ...cached, source: "cache" };
+  }
 
+  const service = createLanguageService(fileName, sourceText);
   const started = performance.now();
   const quickInfo = service.getQuickInfoAtPosition(fileName, position);
   const elapsedMs = performance.now() - started;
@@ -78,14 +142,45 @@ function inspectEditorType(editor: vscode.TextEditor): InspectionResult | null {
 
   service.dispose();
 
-  return {
+  const result: InspectionResult = {
     fileName,
     position,
+    line: editor.selection.active.line,
     elapsedMs,
     typeText,
     complexityScore: score,
     complexitySignals: signals,
+    source: "fresh",
   };
+  cache?.set(cacheKey, result);
+  return result;
+}
+
+function runFixtureBenchmark(
+  editor: vscode.TextEditor,
+  cache: Map<string, InspectionResult>,
+) {
+  const markers = [
+    "unionTarget",
+    "intersectionTarget",
+    "conditionalTarget",
+    "recursiveTarget",
+  ];
+  const results: InspectionResult[] = [];
+
+  for (const marker of markers) {
+    const position = findTextPosition(editor.document, marker);
+    if (!position) {
+      continue;
+    }
+    editor.selection = new vscode.Selection(position, position);
+    const result = inspectEditorType(editor, cache);
+    if (result) {
+      results.push(result);
+    }
+  }
+
+  return results;
 }
 
 function createLanguageService(fileName: string, sourceText: string) {
@@ -189,6 +284,54 @@ function scoreTypeComplexity(
   return { score, signals };
 }
 
+function showInlineMeasurements(
+  editor: vscode.TextEditor,
+  results: InspectionResult[],
+  decorationType: vscode.TextEditorDecorationType,
+) {
+  const decorations = results.map((result) => {
+    const line = editor.document.lineAt(result.line);
+    const badge = ` TSPerf ${result.elapsedMs.toFixed(1)}ms | score ${result.complexityScore}${
+      result.source === "cache" ? " | cached" : ""
+    }`;
+    return {
+      range: new vscode.Range(line.range.end, line.range.end),
+      renderOptions: { after: { contentText: badge } },
+      hoverMessage: new vscode.MarkdownString(
+        [
+          `**TSPerf**`,
+          ``,
+          `- Type lookup: \`${result.elapsedMs.toFixed(2)}ms\``,
+          `- Complexity score: \`${result.complexityScore}\``,
+          `- Source: \`${result.source}\``,
+          ``,
+          ...result.complexitySignals.map((signal) => `- ${signal}`),
+        ].join("\n"),
+      ),
+    };
+  });
+
+  editor.setDecorations(decorationType, decorations);
+}
+
+function getCacheKey(document: vscode.TextDocument, position: number) {
+  return `${document.uri.toString()}:${document.version}:${position}`;
+}
+
+function isInlineDecorationEnabled() {
+  return vscode.workspace
+    .getConfiguration("tsperf")
+    .get<boolean>("enableInlineDecorations", true);
+}
+
+function findTextPosition(document: vscode.TextDocument, marker: string) {
+  const index = document.getText().indexOf(marker);
+  if (index === -1) {
+    return null;
+  }
+  return document.positionAt(index);
+}
+
 function countMatches(value: string, needle: string) {
   return value.split(needle).length - 1;
 }
@@ -215,6 +358,44 @@ function renderResult(result: InspectionResult) {
     .map((signal) => `<li>${escapeHtml(signal)}</li>`)
     .join("");
 
+  return renderPage(
+    "TSPerf",
+    `<div class="metric"><strong>File:</strong> ${fileName}</div>
+    <div class="metric"><strong>Type lookup:</strong> ${result.elapsedMs.toFixed(2)}ms</div>
+    <div class="metric"><strong>Complexity score:</strong> ${result.complexityScore}</div>
+    <div class="metric"><strong>Measurement:</strong> ${result.source}</div>
+    <h2>Type</h2>
+    <code>${typeText}</code>
+    <h2>Signals</h2>
+    <ul>${signals}</ul>`,
+  );
+}
+
+function renderBenchmark(results: InspectionResult[]) {
+  const rows = results
+    .map(
+      (result) => `<tr>
+        <td>${escapeHtml(String(result.line + 1))}</td>
+        <td>${escapeHtml(result.elapsedMs.toFixed(2))}ms</td>
+        <td>${escapeHtml(String(result.complexityScore))}</td>
+        <td><code>${escapeHtml(result.typeText)}</code></td>
+      </tr>`,
+    )
+    .join("");
+  const totalMs = results.reduce((sum, result) => sum + result.elapsedMs, 0);
+
+  return renderPage(
+    "TSPerf Fixture Benchmark",
+    `<div class="metric"><strong>Symbols measured:</strong> ${results.length}</div>
+    <div class="metric"><strong>Total lookup time:</strong> ${totalMs.toFixed(2)}ms</div>
+    <table>
+      <thead><tr><th>Line</th><th>Lookup</th><th>Score</th><th>Type</th></tr></thead>
+      <tbody>${rows}</tbody>
+    </table>`,
+  );
+}
+
+function renderPage(title: string, body: string) {
   return `<!doctype html>
 <html>
   <head>
@@ -222,18 +403,14 @@ function renderResult(result: InspectionResult) {
     <style>
       body { font-family: var(--vscode-font-family); padding: 16px; }
       code { white-space: pre-wrap; }
+      table { border-collapse: collapse; width: 100%; }
+      th, td { border-bottom: 1px solid var(--vscode-editorWidget-border); padding: 8px; text-align: left; vertical-align: top; }
       .metric { margin: 12px 0; }
     </style>
   </head>
   <body>
-    <h1>TSPerf</h1>
-    <div class="metric"><strong>File:</strong> ${fileName}</div>
-    <div class="metric"><strong>Type lookup:</strong> ${result.elapsedMs.toFixed(2)}ms</div>
-    <div class="metric"><strong>Complexity score:</strong> ${result.complexityScore}</div>
-    <h2>Type</h2>
-    <code>${typeText}</code>
-    <h2>Signals</h2>
-    <ul>${signals}</ul>
+    <h1>${escapeHtml(title)}</h1>
+    ${body}
   </body>
 </html>`;
 }
