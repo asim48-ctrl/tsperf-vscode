@@ -1,0 +1,49 @@
+{
+  "name": "tsperf-vscode",
+  "displayName": "TSPerf",
+  "description": "Shows TypeScript type inspection latency and symbol complexity signals in VS Code.",
+  "version": "0.1.0",
+  "license": "MIT",
+  "publisher": "asim48",
+  "engines": {
+    "vscode": "^1.95.0"
+  },
+  "categories": ["Programming Languages", "Linters"],
+  "activationEvents": [
+    "onLanguage:typescript",
+    "onLanguage:typescriptreact",
+    "onCommand:tsperf.inspectTypeAtCursor"
+  ],
+  "main": "./dist/extension.js",
+  "contributes": {
+    "commands": [
+      {
+        "command": "tsperf.inspectTypeAtCursor",
+        "title": "TSPerf: Inspect Type at Cursor"
+      }
+    ],
+    "configuration": {
+      "title": "TSPerf",
+      "properties": {
+        "tsperf.maxFileSizeKb": {
+          "type": "number",
+          "default": 512,
+          "description": "Maximum TypeScript document size TSPerf will inspect automatically."
+        }
+      }
+    }
+  },
+  "scripts": {
+    "build": "tsc -p .",
+    "watch": "tsc -w -p .",
+    "package": "vsce package"
+  },
+  "dependencies": {
+    "typescript": "^5.9.3"
+  },
+  "devDependencies": {
+    "@types/node": "^22.10.0",
+    "@types/vscode": "^1.95.0",
+    "@vscode/vsce": "^3.2.1"
+  }
+}
